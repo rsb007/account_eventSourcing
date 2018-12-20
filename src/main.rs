@@ -11,14 +11,13 @@ extern crate eventsourcing;
 #[macro_use]
 extern crate eventsourcing_derive;
 extern crate json;
-extern crate quicksort;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
 extern crate serde_json;
 extern crate uuid;
-
+extern crate indexmap;
 use std::collections::HashMap;
 
 use cdrs::{types::prelude::*};
@@ -35,6 +34,7 @@ use chrono::{DateTime, Utc};
 use eventsourcing::{eventstore::MemoryEventStore, prelude::*, Result};
 use serde_json::Error;
 use uuid::Uuid;
+use indexmap::IndexMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Event)]
 #[event_type_version("1.0")]
@@ -171,8 +171,8 @@ struct StoredEvent {
 }
 
 
-fn sort_events(events: Vec<BankEvent>) -> HashMap<String, BankEvent> {
-    let mut map: HashMap<String, BankEvent> = HashMap::new();
+fn sort_events(events: Vec<BankEvent>) -> IndexMap<String, BankEvent> {
+    let mut map  = IndexMap::new();
     for event in events {
         let timestamp: String = match event.clone() {
             BankEvent::FundsDeposited(account, payload) => payload.timestamp,
@@ -180,10 +180,11 @@ fn sort_events(events: Vec<BankEvent>) -> HashMap<String, BankEvent> {
         };
         map.insert(timestamp, event);
     }
+    let soretd_map = map.sort_keys();
     map
 }
 
-fn get_events(event_rows: Vec<Row>) -> HashMap<String, BankEvent> {
+fn get_events(event_rows: Vec<Row>) -> IndexMap<String, BankEvent> {
     let mut sorted_event: Vec<BankEvent> = vec![];
 
     let mut final_state: AccountData = AccountData {
@@ -229,11 +230,11 @@ fn get_final_state(acct_num: String, connection: &Session<RoundRobin<TcpConnecti
         .into_rows()
         .expect("into row");
 
-    let sorted_events: HashMap<String, BankEvent> = get_events(event_rows);
+    let sorted_events: IndexMap<String, BankEvent> = get_events(event_rows);
 
-    /*for key in sorted_events.keys() {
+    for key in sorted_events.keys() {
         println!("{}", key)
-    }*/
+    }
 
     let mut final_state: AccountData = state;
 
@@ -294,7 +295,7 @@ fn main() {
         deposit_events.pop();
 */
 
-
+/*
         let withdraw = BankCommand::WithdrawFunds(AccountDetail {
             acctnum: "SAVINGS100".to_string(),
             balance: 400,
@@ -309,10 +310,10 @@ fn main() {
 
         println!("{}", insert_event(&state, &withdraw, &connection));
 
-        let state2: AccountData = Account::apply_event(&state, withdraw.clone()).unwrap();
+        let state2: AccountData = Account::apply_event(&state, withdraw.clone()).unwrap();*/
     // code for getting events from database
 
     //let final_state: AccountData = get_final_state("SAVINGS100".to_string(), &connection,state);
-     println!("{:#?}", state2);
+     println!("{:#?}", state);
    // println!("{:#?}", final_state);
 }
