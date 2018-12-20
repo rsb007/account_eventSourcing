@@ -11,12 +11,15 @@ extern crate eventsourcing;
 #[macro_use]
 extern crate eventsourcing_derive;
 extern crate json;
+extern crate quicksort;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
 extern crate serde_json;
 extern crate uuid;
+
+use std::collections::HashMap;
 
 use cdrs::{types::prelude::*};
 use cdrs::authenticators::NoneAuthenticator;
@@ -84,7 +87,7 @@ impl Aggregate for Account {
         let state: AccountData = match evt {
             BankEvent::FundsWithdrawn(adetail, payload) => AccountData {
                 account: (AccountDetail {
-                    acctnum: state.account.acctnum.to_owned(),
+                    acctnum: adetail.acctnum.to_owned(),
                     balance: state.account.balance - adetail.balance,
                     trans_type: "Withdraw".to_string(),
                 }),
@@ -95,7 +98,7 @@ impl Aggregate for Account {
             },
             BankEvent::FundsDeposited(adetail, payload) => AccountData {
                 account: (AccountDetail {
-                    acctnum: state.account.acctnum.to_owned(),
+                    acctnum: adetail.acctnum.to_owned(),
                     balance: state.account.balance + adetail.balance,
                     trans_type: "Deposit".to_string(),
                 }),
@@ -112,7 +115,7 @@ impl Aggregate for Account {
         // SHOULD DO: validate state and command
 
         // if validation passes...
-        let evts:Vec<BankEvent> = match cmd {
+        let evts: Vec<BankEvent> = match cmd {
             BankCommand::DepositFunds(adetail, payload) => vec![BankEvent::FundsDeposited(
                 AccountDetail {
                     acctnum: adetail.acctnum,
@@ -128,7 +131,7 @@ impl Aggregate for Account {
                     trans_type: "withdraw".to_string(),
                     balance: adetail.balance,
                 }, EventDetail {
-                    generation: 0,
+                    generation: payload.generation,
                     timestamp: payload.timestamp,
                 })],
         };
@@ -144,24 +147,10 @@ struct FullPayload {
 }
 
 fn insert_event(initial_state: &AccountData, event: &BankEvent, connection: &Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>) -> String {
-
-
     let insert_struct_cql: &str = "INSERT INTO account.events \
                            (account_id, event, event_id) VALUES (?, ?, ?)";
 
-
-    let full_payload: FullPayload = match event {
-        BankEvent::FundsDeposited(adetail, payload) | BankEvent::FundsWithdrawn(adetail, payload) => FullPayload {
-            account_event_detail: adetail.to_owned(),
-            event_detail: payload.to_owned(),
-        }
-    };
-
-    let x=serde_json::to_string(&event).unwrap();
-
-    println!("{}",x);
-
-    let payload_json: String = serde_json::to_string(&full_payload).unwrap();
+    let payload_json: String = serde_json::to_string(&event).unwrap();
 
     let uuid: Uuid = Uuid::new_v4();
 
@@ -181,22 +170,26 @@ struct StoredEvent {
     event: String,
 }
 
-fn get_final_state(acct_num: String, connection: &Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>) -> AccountData {
 
-    let select_struct_cql: &str = "Select * from account.events where account_id = ?";
+fn sort_events(events: Vec<BankEvent>) -> HashMap<String, BankEvent> {
+    let mut map: HashMap<String, BankEvent> = HashMap::new();
+    for event in events {
+        let timestamp: String = match event.clone() {
+            BankEvent::FundsDeposited(account, payload) => payload.timestamp,
+            BankEvent::FundsWithdrawn(account, payload) => payload.timestamp,
+        };
+        map.insert(timestamp, event);
+    }
+    map
+}
 
-    let event_rows: Vec<Row> = connection
-        .query_with_values(select_struct_cql, query_values!(acct_num.clone()))
-        .expect("query")
-        .get_body()
-        .expect("get body")
-        .into_rows()
-        .expect("into row");
+fn get_events(event_rows: Vec<Row>) -> HashMap<String, BankEvent> {
+    let mut sorted_event: Vec<BankEvent> = vec![];
 
     let mut final_state: AccountData = AccountData {
         account: (AccountDetail {
-            acctnum: acct_num,
-            balance: 0,
+            acctnum: String::new(),
+            balance: 800,
             trans_type: String::new(),
         }),
         payload: (EventDetail { generation: 1, timestamp: String::new() }),
@@ -209,89 +202,117 @@ fn get_final_state(acct_num: String, connection: &Session<RoundRobin<TcpConnecti
         event: String::new(),
     };
 
-
     for event in event_rows {
         getevent = StoredEvent::try_from_row(event).expect("into GetEvent Struct");
-        let bankevent: FullPayload = serde_json::from_str(&getevent.event).unwrap();
 
-        if (bankevent.account_event_detail.trans_type == "Deposit") {
-            let deposit = BankCommand::DepositFunds(bankevent.account_event_detail,
-                                                    bankevent.event_detail);
-            let post_depo = Account::handle_command(&final_state, deposit)
-                .unwrap();
-            final_state = Account::apply_event(&final_state, post_depo[0].clone()).unwrap();
-        } else {
-            let withdraw = BankCommand::WithdrawFunds(bankevent.account_event_detail,
-                                                      bankevent.event_detail);
-            let post_withdraw = Account::handle_command(&final_state,
-                                                        withdraw).unwrap();
-            final_state = Account::apply_event(&final_state, post_withdraw[0].clone())
-                .unwrap();
-        }
+        final_state.account.acctnum = getevent.account_id.to_owned();
+
+        let bankevent: BankEvent = serde_json::from_str(&getevent.event).unwrap();
+
+        sorted_event.push(bankevent.to_owned());
+        // final_state = Account::apply_event(&final_state, bankevent).unwrap();
     }
+    let sorted_map = sort_events(sorted_event);
+
+    sorted_map
+}
+
+fn get_final_state(acct_num: String, connection: &Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>, state: AccountData) -> AccountData {
+
+    let select_struct_cql: &str = "Select * from account.events where account_id = ?";
+
+    let event_rows: Vec<Row> = connection
+        .query_with_values(select_struct_cql, query_values!(acct_num.clone()))
+        .expect("query")
+        .get_body()
+        .expect("get body")
+        .into_rows()
+        .expect("into row");
+
+    let sorted_events: HashMap<String, BankEvent> = get_events(event_rows);
+
+    /*for key in sorted_events.keys() {
+        println!("{}", key)
+    }*/
+
+    let mut final_state: AccountData = state;
+
+    for value in sorted_events.values() {
+        final_state = Account::apply_event(&final_state, value.clone()).unwrap();
+    }
+
     final_state
 }
 
 fn main() {
+
+    let connection: Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>> = account_eventsourcing::dbconnection::connection();
+    let initial_state = AccountData{ account: (AccountDetail{
+        acctnum: String::new(),
+        balance: 0,
+        trans_type: String::new()
+    }), payload: (EventDetail{ generation: 0, timestamp: String::new() }) };
+
+    let state= get_final_state("SAVINGS100".to_string(), &connection, initial_state);
+
     let now: DateTime<Utc> = Utc::now();
 
     let account_store: MemoryEventStore = MemoryEventStore::new();
 
-    let connection: Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>> = account_eventsourcing::dbconnection::connection();
 
-    let deposit: BankCommand = BankCommand::DepositFunds(AccountDetail {
-        acctnum: "SAVINGS100".to_string(),
-        balance: 500,
-        trans_type: "".to_string(),
-    }, EventDetail {
-        generation: 1,
-        timestamp: now.to_string(),
-    });
+/*
 
-    let initial_state: AccountData = AccountData {
-        account: AccountDetail {
+        let deposit: BankCommand = BankCommand::DepositFunds(AccountDetail {
             acctnum: "SAVINGS100".to_string(),
-            balance: 0,
+            balance: 500,
             trans_type: "".to_string(),
-        },
-        payload: EventDetail {
-            generation: 1, timestamp: now.to_string()
-        },
-    };
+        }, EventDetail {
+            generation: 1,
+            timestamp: now.to_string(),
+        });
+
+        let initial_state: AccountData = AccountData {
+            account: AccountDetail {
+                acctnum: "SAVINGS100".to_string(),
+                balance: 0,
+                trans_type: "".to_string(),
+            },
+            payload: EventDetail {
+                generation: 1, timestamp: now.to_string()
+            },
+        };
 
 
-    let mut deposit_events: Vec<BankEvent> = Account::handle_command(&initial_state, deposit)
-        .unwrap();
+        let mut deposit_events: Vec<BankEvent> = Account::handle_command(&initial_state, deposit)
+            .unwrap();
 
-    let state: AccountData= Account::apply_event(&initial_state, deposit_events[0].clone())
-        .unwrap();
+        let state: AccountData= Account::apply_event(&initial_state, deposit_events[0].clone())
+            .unwrap();
 
-    println!("{}", insert_event(&initial_state, &deposit_events[0],&connection));
+        println!("{}", insert_event(&initial_state, &deposit_events[0],&connection));
 
-    deposit_events.pop();
-
-
-
-    let withdraw = BankCommand::WithdrawFunds(AccountDetail {
-        acctnum: "SAVINGS100".to_string(),
-        balance: 400,
-        trans_type: "".to_string(),
-    }, EventDetail {
-        generation: 1,
-        timestamp: now.to_string(),
-    });
-
-    deposit_events.push(Account::handle_command(&state, withdraw).unwrap().pop()
-        .unwrap());
-
-    println!("{}", insert_event(&state, &deposit_events[0], &connection));
+        deposit_events.pop();
+*/
 
 
-    let state2: AccountData = Account::apply_event(&state, deposit_events[0].clone()).unwrap();
+        let withdraw = BankCommand::WithdrawFunds(AccountDetail {
+            acctnum: "SAVINGS100".to_string(),
+            balance: 400,
+            trans_type: "".to_string(),
+        }, EventDetail {
+            generation: 1,
+            timestamp: now.to_string(),
+        });
 
+        let withdraw = Account::handle_command(&state, withdraw).unwrap().pop()
+            .unwrap();
+
+        println!("{}", insert_event(&state, &withdraw, &connection));
+
+        let state2: AccountData = Account::apply_event(&state, withdraw.clone()).unwrap();
     // code for getting events from database
 
-    let final_state: AccountData = get_final_state("SAVINGS100".to_string(),&connection);
-    println!("{:#?}", state2);
-    println!("{:#?}", final_state);
+    //let final_state: AccountData = get_final_state("SAVINGS100".to_string(), &connection,state);
+     println!("{:#?}", state2);
+   // println!("{:#?}", final_state);
 }
