@@ -143,7 +143,7 @@ struct FullPayload {
     event_detail: EventDetail,
 }
 
-fn insert_event(initial_state: &AccountData, event: &BankEvent, connection: Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>) -> String {
+fn insert_event(initial_state: &AccountData, event: &BankEvent, connection: &Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>) -> String {
 
 
     let insert_struct_cql: &str = "INSERT INTO account.events \
@@ -156,6 +156,10 @@ fn insert_event(initial_state: &AccountData, event: &BankEvent, connection: Sess
             event_detail: payload.to_owned(),
         }
     };
+
+    let x=serde_json::to_string(&event).unwrap();
+
+    println!("{}",x);
 
     let payload_json: String = serde_json::to_string(&full_payload).unwrap();
 
@@ -177,7 +181,7 @@ struct StoredEvent {
     event: String,
 }
 
-fn get_final_state(acct_num: String, connection: Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>) -> AccountData {
+fn get_final_state(acct_num: String, connection: &Session<RoundRobin<TcpConnectionPool<NoneAuthenticator>>>) -> AccountData {
 
     let select_struct_cql: &str = "Select * from account.events where account_id = ?";
 
@@ -262,9 +266,10 @@ fn main() {
     let state: AccountData= Account::apply_event(&initial_state, deposit_events[0].clone())
         .unwrap();
 
-    println!("{}", insert_event(&initial_state, &deposit_events[0],connection));
+    println!("{}", insert_event(&initial_state, &deposit_events[0],&connection));
 
     deposit_events.pop();
+
 
 
     let withdraw = BankCommand::WithdrawFunds(AccountDetail {
@@ -279,14 +284,14 @@ fn main() {
     deposit_events.push(Account::handle_command(&state, withdraw).unwrap().pop()
         .unwrap());
 
-    println!("{}", insert_event(&state, &deposit_events[0], connection));
+    println!("{}", insert_event(&state, &deposit_events[0], &connection));
 
 
     let state2: AccountData = Account::apply_event(&state, deposit_events[0].clone()).unwrap();
 
     // code for getting events from database
 
-    let final_state: AccountData = get_final_state("SAVINGS100".to_string(),connection);
+    let final_state: AccountData = get_final_state("SAVINGS100".to_string(),&connection);
     println!("{:#?}", state2);
     println!("{:#?}", final_state);
 }

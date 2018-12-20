@@ -15,3 +15,6 @@ cdrs_helpers_derive = '*'
 json = "*"
 uuid = { version = "0.7", features = ["v4"] }
 chrono = "0.4.6"
+actix-web = "0.7"
+actix = "0.7"
+listenfd = "0.3"
